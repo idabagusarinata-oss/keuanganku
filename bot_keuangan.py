@@ -20,8 +20,10 @@ DB_NAME = "keuangan.db"
 # ================= DATABASE =================
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
+if not DATABASE_URL:
+    raise Exception("DATABASE_URL not found!")
+
 conn = psycopg2.connect(DATABASE_URL)
-conn.autocommit = True
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -342,4 +344,5 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 print("Bot berjalan...")
 app.run_polling(drop_pending_updates=True)
+
 
