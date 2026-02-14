@@ -1,4 +1,5 @@
-import sqlite3
+import psycopg2
+import os
 import matplotlib.pyplot as plt
 from datetime import datetime
 import shutil
@@ -17,7 +18,10 @@ ADMIN_ID = 7605783818
 DB_NAME = "keuangan.db"
 
 # ================= DATABASE =================
-conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+conn = psycopg2.connect(DATABASE_URL)
+conn.autocommit = True
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -338,3 +342,4 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 print("Bot berjalan...")
 app.run_polling(drop_pending_updates=True)
+
