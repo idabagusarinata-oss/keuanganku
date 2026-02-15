@@ -8,18 +8,23 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import pagesizes
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import smtplib
+from email.message import EmailMessage
 
 TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID"))
-
-# ================= DATABASE =================
 DATABASE_URL = os.environ.get("DATABASE_URL")
+EMAIL_ADDRESS = os.environ.get("EMAIL_ADDRESS")
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
+
 if not DATABASE_URL:
     raise Exception("DATABASE_URL not found!")
 
 conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
 
+# ================= TABLE =================
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS pemasukan (
     id SERIAL PRIMARY KEY,
@@ -53,19 +58,54 @@ def validasi_nominal(text):
     return jumlah, None
 
 # ================= GENERATE NO =================
-def generate_no_transaksi(tipe, tanggal):
+def generate_no_transaksi(tipe):
+    tanggal = datetime.now().strftime("%Y-%m-%d")
     tahun_bulan = tanggal.replace("-", "")[:6]
     prefix = "PMK" if tipe == "pemasukan" else "PNG"
     table = "pemasukan" if tipe == "pemasukan" else "pengeluaran"
 
-    cursor.execute(
-        f"SELECT COUNT(*) FROM {table} WHERE tanggal >= %s AND tanggal < %s",
-        (tanggal[:7] + "-01", tanggal[:7] + "-31")
-    )
-
+    cursor.execute(f"SELECT COUNT(*) FROM {table}")
     count = cursor.fetchone()[0] + 1
     nomor = str(count).zfill(4)
-    return f"{prefix}-{tahun_bulan}-{nomor}"
+
+    return f"{prefix}-{tahun_bulan}-{nomor}", tanggal
+
+# ================= BACKUP =================
+async def backup_database(app):
+    now = datetime.now().strftime("%Y-%m-%d")
+    filename = f"backup_{now}.sql"
+
+    with open(filename, "w", encoding="utf-8") as f:
+        cursor.execute("SELECT * FROM pemasukan")
+        for r in cursor.fetchall():
+            f.write(f"INSERT INTO pemasukan VALUES {r};\n")
+
+        cursor.execute("SELECT * FROM pengeluaran")
+        for r in cursor.fetchall():
+            f.write(f"INSERT INTO pengeluaran VALUES {r};\n")
+
+    # Telegram
+    await app.bot.send_document(
+        chat_id=ADMIN_ID,
+        document=open(filename, "rb"),
+        caption=f"Backup mingguan {now} berhasil ✅"
+    )
+
+    # Email
+    msg = EmailMessage()
+    msg["Subject"] = f"Backup Database {now}"
+    msg["From"] = EMAIL_ADDRESS
+    msg["To"] = "idabagusarinata@gmail.com"
+    msg.set_content("Backup database terlampir.")
+
+    with open(filename, "rb") as f:
+        msg.add_attachment(f.read(), maintype="application", subtype="octet-stream", filename=filename)
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+        server.send_message(msg)
+
+    os.remove(filename)
 
 # ================= KEYBOARD =================
 keyboard = [
@@ -76,11 +116,10 @@ keyboard = [
 ]
 reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-# ================= START =================
+# ================= BOT LOGIC =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot Keuangan Aktif ✅", reply_markup=reply_markup)
 
-# ================= HANDLE =================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
@@ -102,7 +141,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("SELECT COALESCE(SUM(jumlah),0) FROM pengeluaran")
         pengeluaran = cursor.fetchone()[0]
         saldo = pemasukan - pengeluaran
-
         await update.message.reply_text(
             f"Pemasukan: Rp {pemasukan:,}\n"
             f"Pengeluaran: Rp {pengeluaran:,}\n"
@@ -121,16 +159,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if error:
             await update.message.reply_text(error)
             return
-
-        tanggal = datetime.now().strftime("%Y-%m-%d")
-        no = generate_no_transaksi("pemasukan", tanggal)
-
+        no, tanggal = generate_no_transaksi("pemasukan")
         cursor.execute(
-            "INSERT INTO pemasukan (no_transaksi, jumlah, tanggal) VALUES (%s, %s, %s)",
+            "INSERT INTO pemasukan (no_transaksi, jumlah, tanggal) VALUES (%s,%s,%s)",
             (no, jumlah, tanggal)
         )
         conn.commit()
-
         await update.message.reply_text(f"Disimpan ✅\nNo: {no}")
         context.user_data["mode"] = None
         return
@@ -152,27 +186,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if error:
             await update.message.reply_text(error)
             return
-
-        tanggal = datetime.now().strftime("%Y-%m-%d")
-        no = generate_no_transaksi("pengeluaran", tanggal)
-
+        no, tanggal = generate_no_transaksi("pengeluaran")
         cursor.execute("""
             INSERT INTO pengeluaran
-            (no_transaksi, keterangan, kategori, jumlah, merchant, tanggal)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (
-            no,
-            context.user_data["keterangan"],
-            "Umum",
-            jumlah,
-            "Tidak disebutkan",
-            tanggal
-        ))
+            (no_transaksi,keterangan,kategori,jumlah,merchant,tanggal)
+            VALUES (%s,%s,%s,%s,%s,%s)
+        """, (no, context.user_data["keterangan"], "Umum", jumlah, "-", tanggal))
         conn.commit()
-
         await update.message.reply_text(f"Disimpan ✅\nNo: {no}")
         context.user_data["mode"] = None
         return
+
+# ================= SCHEDULER =================
+scheduler = AsyncIOScheduler()
+
+# Mingguan setiap Minggu 00:00 WIB (17:00 UTC)
+scheduler.add_job(
+    backup_database,
+    "cron",
+    day_of_week="sun",
+    hour=17,
+    minute=0,
+    args=[None]
+)
+
+scheduler.start()
 
 # ================= RUN =================
 app = ApplicationBuilder().token(TOKEN).build()
