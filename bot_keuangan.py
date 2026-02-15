@@ -1,17 +1,17 @@
 import psycopg2
 import os
 import matplotlib.pyplot as plt
-from datetime import datetime
+from datetime import datetime, time, timezone, timedelta
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import pagesizes
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import smtplib
 from email.message import EmailMessage
 
+# ================= ENV =================
 TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID"))
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -21,10 +21,10 @@ EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD")
 if not DATABASE_URL:
     raise Exception("DATABASE_URL not found!")
 
+# ================= DATABASE =================
 conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
 
-# ================= TABLE =================
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS pemasukan (
     id SERIAL PRIMARY KEY,
@@ -70,8 +70,8 @@ def generate_no_transaksi(tipe):
 
     return f"{prefix}-{tahun_bulan}-{nomor}", tanggal
 
-# ================= BACKUP =================
-async def backup_database(app):
+# ================= BACKUP FUNCTION =================
+async def weekly_backup(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now().strftime("%Y-%m-%d")
     filename = f"backup_{now}.sql"
 
@@ -85,7 +85,7 @@ async def backup_database(app):
             f.write(f"INSERT INTO pengeluaran VALUES {r};\n")
 
     # Telegram
-    await app.bot.send_document(
+    await context.bot.send_document(
         chat_id=ADMIN_ID,
         document=open(filename, "rb"),
         caption=f"Backup mingguan {now} berhasil ✅"
@@ -99,7 +99,12 @@ async def backup_database(app):
     msg.set_content("Backup database terlampir.")
 
     with open(filename, "rb") as f:
-        msg.add_attachment(f.read(), maintype="application", subtype="octet-stream", filename=filename)
+        msg.add_attachment(
+            f.read(),
+            maintype="application",
+            subtype="octet-stream",
+            filename=filename
+        )
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
@@ -150,18 +155,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # PEMASUKAN
     if text == "Pemasukan":
-        context.user_data["mode"] = "pm_jumlah"
+        context.user_data["mode"] = "pm"
         await update.message.reply_text("Masukkan nominal:")
         return
 
-    if context.user_data.get("mode") == "pm_jumlah":
+    if context.user_data.get("mode") == "pm":
         jumlah, error = validasi_nominal(text)
         if error:
             await update.message.reply_text(error)
             return
         no, tanggal = generate_no_transaksi("pemasukan")
         cursor.execute(
-            "INSERT INTO pemasukan (no_transaksi, jumlah, tanggal) VALUES (%s,%s,%s)",
+            "INSERT INTO pemasukan (no_transaksi,jumlah,tanggal) VALUES (%s,%s,%s)",
             (no, jumlah, tanggal)
         )
         conn.commit()
@@ -197,25 +202,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["mode"] = None
         return
 
-# ================= SCHEDULER =================
-scheduler = AsyncIOScheduler()
-
-# Mingguan setiap Minggu 00:00 WIB (17:00 UTC)
-scheduler.add_job(
-    backup_database,
-    "cron",
-    day_of_week="sun",
-    hour=17,
-    minute=0,
-    args=[None]
-)
-
-scheduler.start()
-
 # ================= RUN =================
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+# Schedule Mingguan Minggu 00:00 WIB
+wib = timezone(timedelta(hours=7))
+app.job_queue.run_daily(
+    weekly_backup,
+    time=time(hour=0, minute=0, tzinfo=wib),
+    days=(6,)
+)
 
 print("Bot berjalan...")
 app.run_polling(drop_pending_updates=True)
