@@ -126,10 +126,11 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
 
         if GOOGLE_READY:
-            sheet_pm.clear()
-            sheet_pg.clear()
-            sheet_pm.append_row(["No Transaksi","Nominal","Tanggal"])
-            sheet_pg.append_row(["No Transaksi","Belanja","Kategori","Nominal","Merchant","Tanggal"])
+            # Hapus hanya data, bukan header & formula
+            sheet_pm.batch_clear(["A2:D10000"])
+            sheet_pg.batch_clear(["A2:G10000"])
+            sheet_pm.append_row(["No Transaksi","Nominal","Tanggal","Bulan"])
+            sheet_pg.append_row(["No Transaksi","Belanja","Kategori","Nominal","Merchant","Tanggal","Bulan"])
 
         await update.message.reply_text("Data berhasil direset ✅")
         return
@@ -350,3 +351,4 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
 
 print("Bot berjalan...")
 app.run_polling(drop_pending_updates=True)
+
