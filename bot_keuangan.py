@@ -1,6 +1,8 @@
 import os
 import json
 import psycopg2
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup
@@ -92,24 +94,6 @@ def generate_no(tipe):
     count = cursor.fetchone()[0] + 1
     return f"{prefix}-{now}-{str(count).zfill(4)}"
 
-def update_ringkasan():
-    if not GOOGLE_READY:
-        return
-    try:
-        cursor.execute("SELECT COALESCE(SUM(jumlah),0) FROM pemasukan")
-        total_pm = cursor.fetchone()[0]
-        cursor.execute("SELECT COALESCE(SUM(jumlah),0) FROM pengeluaran")
-        total_pg = cursor.fetchone()[0]
-        saldo = total_pm - total_pg
-
-        sheet_ringkasan.update("A1:B3", [
-            ["Total Pemasukan", total_pm],
-            ["Total Pengeluaran", total_pg],
-            ["Saldo", saldo]
-        ])
-    except Exception as e:
-        print("Ringkasan Error:", e)
-
 # ================= KEYBOARD =================
 keyboard = [
     ["Pemasukan", "Pengeluaran"],
@@ -125,151 +109,79 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    user_id = update.effective_user.id
 
-    # RESET
-    if text == "Reset Keuangan":
-        if user_id != ADMIN_ID:
-            await update.message.reply_text("❌ Anda bukan admin.")
-            return
-        cursor.execute("TRUNCATE pemasukan, pengeluaran RESTART IDENTITY")
-        conn.commit()
-        await update.message.reply_text("Data berhasil direset.")
+    # ================= EXPORT PDF FIX =================
+    if text == "Export PDF":
+        context.user_data["mode"] = "export"
+        await update.message.reply_text("Masukkan bulan (format YYYY-MM)\nContoh: 2026-02")
         return
 
-    # CEK SALDO
-    if text == "Cek Saldo":
-        cursor.execute("SELECT COALESCE(SUM(jumlah),0) FROM pemasukan")
-        pm = cursor.fetchone()[0]
-        cursor.execute("SELECT COALESCE(SUM(jumlah),0) FROM pengeluaran")
-        pg = cursor.fetchone()[0]
-        await update.message.reply_text(
-            f"Pemasukan: Rp {pm:,}\nPengeluaran: Rp {pg:,}\nSaldo: Rp {pm-pg:,}"
-        )
-        return
-
-    # PENGELUARAN TERBESAR
-    if text == "Pengeluaran Terbesar":
-        cursor.execute("SELECT keterangan,jumlah,merchant FROM pengeluaran ORDER BY jumlah DESC LIMIT 1")
-        data = cursor.fetchone()
-        if data:
-            await update.message.reply_text(f"{data[0]}\nRp {data[1]:,}\nMerchant: {data[2]}")
-        else:
-            await update.message.reply_text("Belum ada data.")
-        return
-
-    # PEMASUKAN FLOW
-    if text == "Pemasukan":
-        context.user_data["mode"] = "pm"
-        await update.message.reply_text("Masukkan nominal:")
-        return
-
-    if context.user_data.get("mode") == "pm":
-        jumlah = validasi_nominal(text)
-        if not jumlah:
-            await update.message.reply_text("Masukkan angka valid.")
-            return
-        context.user_data["jumlah"] = jumlah
-        context.user_data["mode"] = "pm_tgl"
-        await update.message.reply_text("Tanggal (YYYY-MM-DD / hari ini / kemarin):")
-        return
-
-    if context.user_data.get("mode") == "pm_tgl":
-        tanggal = parse_tanggal(text)
-        if not tanggal:
-            await update.message.reply_text("Format salah.")
+    if context.user_data.get("mode") == "export":
+        try:
+            datetime.strptime(text, "%Y-%m")
+        except:
+            await update.message.reply_text("Format salah. Gunakan YYYY-MM")
             return
 
-        no = generate_no("pemasukan")
+        bulan = text
+        filename = f"Laporan_Keuangan_{bulan}.pdf"
 
-        cursor.execute(
-            "INSERT INTO pemasukan (no_transaksi,jumlah,tanggal) VALUES (%s,%s,%s)",
-            (no, context.user_data["jumlah"], tanggal)
-        )
-        conn.commit()
+        try:
+            doc = SimpleDocTemplate(filename, pagesize=pagesizes.A4)
+            elements = []
+            styles = getSampleStyleSheet()
 
-        if GOOGLE_READY:
-            try:
-                sheet_pm.append_row([no, context.user_data["jumlah"], tanggal])
-                update_ringkasan()
-            except Exception as e:
-                print("Sheet PM Error:", e)
+            elements.append(Paragraph(f"LAPORAN KEUANGAN BULAN {bulan}", styles["Title"]))
+            elements.append(Spacer(1, 20))
 
-        await update.message.reply_text(f"Disimpan ✅\nNo: {no}")
-        context.user_data.clear()
-        return
+            cursor.execute("""
+                SELECT no_transaksi,jumlah,tanggal
+                FROM pemasukan
+                WHERE TO_CHAR(tanggal,'YYYY-MM')=%s
+            """,(bulan,))
+            pm = cursor.fetchall()
 
-    # PENGELUARAN FLOW
-    if text == "Pengeluaran":
-        context.user_data["mode"] = "pg_ket"
-        await update.message.reply_text("Belanja apa?")
-        return
+            cursor.execute("""
+                SELECT no_transaksi,keterangan,kategori,jumlah,merchant,tanggal
+                FROM pengeluaran
+                WHERE TO_CHAR(tanggal,'YYYY-MM')=%s
+            """,(bulan,))
+            pg = cursor.fetchall()
 
-    if context.user_data.get("mode") == "pg_ket":
-        context.user_data["keterangan"] = text
-        context.user_data["mode"] = "pg_kategori"
-        await update.message.reply_text("Kategori?")
-        return
+            total_pm = sum(p[1] for p in pm)
+            total_pg = sum(p[3] for p in pg)
 
-    if context.user_data.get("mode") == "pg_kategori":
-        context.user_data["kategori"] = text
-        context.user_data["mode"] = "pg_jumlah"
-        await update.message.reply_text("Nominal?")
-        return
+            data_pm = [["No","Nominal","Tanggal"]]
+            for p in pm:
+                data_pm.append([p[0],f"Rp {p[1]:,}",str(p[2])])
 
-    if context.user_data.get("mode") == "pg_jumlah":
-        jumlah = validasi_nominal(text)
-        if not jumlah:
-            await update.message.reply_text("Masukkan angka valid.")
-            return
-        context.user_data["jumlah"] = jumlah
-        context.user_data["mode"] = "pg_merchant"
-        await update.message.reply_text("Merchant?")
-        return
+            table_pm = Table(data_pm)
+            table_pm.setStyle(TableStyle([("GRID",(0,0),(-1,-1),1,colors.black)]))
+            elements.append(table_pm)
+            elements.append(Spacer(1,20))
 
-    if context.user_data.get("mode") == "pg_merchant":
-        context.user_data["merchant"] = text
-        context.user_data["mode"] = "pg_tgl"
-        await update.message.reply_text("Tanggal (YYYY-MM-DD / hari ini / kemarin):")
-        return
+            data_pg = [["No","Belanja","Kategori","Nominal","Merchant","Tanggal"]]
+            for p in pg:
+                data_pg.append([p[0],p[1],p[2],f"Rp {p[3]:,}",p[4],str(p[5])])
 
-    if context.user_data.get("mode") == "pg_tgl":
-        tanggal = parse_tanggal(text)
-        if not tanggal:
-            await update.message.reply_text("Format salah.")
-            return
+            table_pg = Table(data_pg)
+            table_pg.setStyle(TableStyle([("GRID",(0,0),(-1,-1),1,colors.black)]))
+            elements.append(table_pg)
+            elements.append(Spacer(1,20))
 
-        no = generate_no("pengeluaran")
+            elements.append(Paragraph(f"Total Pemasukan: Rp {total_pm:,}",styles["Normal"]))
+            elements.append(Paragraph(f"Total Pengeluaran: Rp {total_pg:,}",styles["Normal"]))
+            elements.append(Paragraph(f"Sisa Saldo: Rp {total_pm-total_pg:,}",styles["Normal"]))
 
-        cursor.execute("""
-            INSERT INTO pengeluaran
-            (no_transaksi,keterangan,kategori,jumlah,merchant,tanggal)
-            VALUES (%s,%s,%s,%s,%s,%s)
-        """, (
-            no,
-            context.user_data["keterangan"],
-            context.user_data["kategori"],
-            context.user_data["jumlah"],
-            context.user_data["merchant"],
-            tanggal
-        ))
-        conn.commit()
+            doc.build(elements)
 
-        if GOOGLE_READY:
-            try:
-                sheet_pg.append_row([
-                    no,
-                    context.user_data["keterangan"],
-                    context.user_data["kategori"],
-                    context.user_data["jumlah"],
-                    context.user_data["merchant"],
-                    tanggal
-                ])
-                update_ringkasan()
-            except Exception as e:
-                print("Sheet PG Error:", e)
+            await update.message.reply_document(open(filename,"rb"))
+            os.remove(filename)
 
-        await update.message.reply_text(f"Disimpan ✅\nNo: {no}")
+        except Exception as e:
+            print("PDF Error:", e)
+            await update.message.reply_text("Terjadi kesalahan saat membuat PDF.")
+
         context.user_data.clear()
         return
 
