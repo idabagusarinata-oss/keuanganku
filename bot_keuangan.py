@@ -44,20 +44,19 @@ CREATE TABLE IF NOT EXISTS pengeluaran (
     tanggal DATE
 )
 """)
-
 conn.commit()
 
-# ================= GOOGLE SHEET =================
+# ================= GOOGLE SHEETS =================
 GOOGLE_READY = False
 try:
     scope = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
-    creds_dict = json.loads(GOOGLE_CREDS)
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+    creds = Credentials.from_service_account_info(
+        json.loads(GOOGLE_CREDS), scopes=scope
+    )
     client = gspread.authorize(creds)
-
     spreadsheet = client.open("Monitoring Keuangan")
     sheet_pm = spreadsheet.worksheet("Pemasukan")
     sheet_pg = spreadsheet.worksheet("Pengeluaran")
@@ -87,10 +86,10 @@ def parse_tanggal(text):
 def validasi_nominal(text):
     if not text.isdigit():
         return None
-    jumlah = int(text)
-    if jumlah <= 0:
+    val = int(text)
+    if val <= 0:
         return None
-    return jumlah
+    return val
 
 def generate_no(tipe):
     prefix = "PMK" if tipe=="pemasukan" else "PNG"
@@ -117,7 +116,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user_id = update.effective_user.id
 
-    # ===== RESET =====
+    # RESET
     if text == "Reset Keuangan":
         if user_id != ADMIN_ID:
             await update.message.reply_text("❌ Anda bukan admin.")
@@ -135,7 +134,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Data berhasil direset ✅")
         return
 
-    # ===== CEK SALDO =====
+    # CEK SALDO
     if text == "Cek Saldo":
         cursor.execute("SELECT COALESCE(SUM(jumlah),0) FROM pemasukan")
         pm = cursor.fetchone()[0]
@@ -146,7 +145,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ===== PENGELUARAN TERBESAR =====
+    # PENGELUARAN TERBESAR
     if text == "Pengeluaran Terbesar":
         cursor.execute("SELECT keterangan,jumlah,merchant FROM pengeluaran ORDER BY jumlah DESC LIMIT 1")
         data = cursor.fetchone()
@@ -156,7 +155,108 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Belum ada data.")
         return
 
-    # ===== GRAFIK =====
+    # ================= PEMASUKAN =================
+    if text == "Pemasukan":
+        context.user_data["mode"] = "pm_jumlah"
+        await update.message.reply_text("Masukkan nominal:")
+        return
+
+    if context.user_data.get("mode") == "pm_jumlah":
+        jumlah = validasi_nominal(text)
+        if not jumlah:
+            await update.message.reply_text("Masukkan angka valid.")
+            return
+        context.user_data["jumlah"] = jumlah
+        context.user_data["mode"] = "pm_tanggal"
+        await update.message.reply_text("Tanggal (YYYY-MM-DD / hari ini / kemarin):")
+        return
+
+    if context.user_data.get("mode") == "pm_tanggal":
+        tanggal = parse_tanggal(text)
+        if not tanggal:
+            await update.message.reply_text("Format tanggal salah.")
+            return
+
+        no = generate_no("pemasukan")
+        cursor.execute(
+            "INSERT INTO pemasukan (no_transaksi,jumlah,tanggal) VALUES (%s,%s,%s)",
+            (no,context.user_data["jumlah"],tanggal)
+        )
+        conn.commit()
+
+        if GOOGLE_READY:
+            sheet_pm.append_row([no,context.user_data["jumlah"],tanggal])
+
+        await update.message.reply_text(f"Disimpan ✅\nNo: {no}")
+        context.user_data.clear()
+        return
+
+    # ================= PENGELUARAN =================
+    if text == "Pengeluaran":
+        context.user_data["mode"] = "pg_ket"
+        await update.message.reply_text("Belanja apa?")
+        return
+
+    if context.user_data.get("mode") == "pg_ket":
+        context.user_data["keterangan"] = text
+        context.user_data["mode"] = "pg_kategori"
+        await update.message.reply_text("Kategori?")
+        return
+
+    if context.user_data.get("mode") == "pg_kategori":
+        context.user_data["kategori"] = text
+        context.user_data["mode"] = "pg_jumlah"
+        await update.message.reply_text("Nominal?")
+        return
+
+    if context.user_data.get("mode") == "pg_jumlah":
+        jumlah = validasi_nominal(text)
+        if not jumlah:
+            await update.message.reply_text("Masukkan angka valid.")
+            return
+        context.user_data["jumlah"] = jumlah
+        context.user_data["mode"] = "pg_merchant"
+        await update.message.reply_text("Merchant?")
+        return
+
+    if context.user_data.get("mode") == "pg_merchant":
+        context.user_data["merchant"] = text
+        context.user_data["mode"] = "pg_tanggal"
+        await update.message.reply_text("Tanggal (YYYY-MM-DD / hari ini / kemarin):")
+        return
+
+    if context.user_data.get("mode") == "pg_tanggal":
+        tanggal = parse_tanggal(text)
+        if not tanggal:
+            await update.message.reply_text("Format tanggal salah.")
+            return
+
+        no = generate_no("pengeluaran")
+        cursor.execute("""
+            INSERT INTO pengeluaran
+            (no_transaksi,keterangan,kategori,jumlah,merchant,tanggal)
+            VALUES (%s,%s,%s,%s,%s,%s)
+        """,(no,
+             context.user_data["keterangan"],
+             context.user_data["kategori"],
+             context.user_data["jumlah"],
+             context.user_data["merchant"],
+             tanggal))
+        conn.commit()
+
+        if GOOGLE_READY:
+            sheet_pg.append_row([no,
+                                 context.user_data["keterangan"],
+                                 context.user_data["kategori"],
+                                 context.user_data["jumlah"],
+                                 context.user_data["merchant"],
+                                 tanggal])
+
+        await update.message.reply_text(f"Disimpan ✅\nNo: {no}")
+        context.user_data.clear()
+        return
+
+    # ================= GRAFIK =================
     if text == "Grafik Kategori":
         bulan = datetime.now().strftime("%Y-%m")
         cursor.execute("""
@@ -186,7 +286,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.remove("grafik.png")
         return
 
-    # ===== EXPORT PDF =====
+    # ================= EXPORT PDF =================
     if text == "Export PDF":
         context.user_data["mode"] = "export"
         await update.message.reply_text("Masukkan bulan (YYYY-MM):")
