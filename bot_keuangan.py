@@ -126,16 +126,15 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
 
         if GOOGLE_READY:
-            # Hapus hanya data, bukan header & formula
-            last_row_pm = len(sheet_pm.get_all_values())
-            last_row_pg = len(sheet_pg.get_all_values())
+           # Hapus hanya kolom input Pemasukan (A,B,C)
+           last_pm = len(sheet_pm.get_all_values())
+           if last_pm > 1:
+              sheet_pm.batch_clear([f"A2:C{last_pm}"])
 
-            # Hapus hanya jika ada data
-            if last_row_pm > 1:
-               sheet_pm.batch_clear([f"A2:D{last_row_pm}"])
-
-            if last_row_pg > 1:
-               sheet_pg.batch_clear([f"A2:G{last_row_pg}"])
+           # Hapus hanya kolom input Pengeluaran (A,B,C,D,E,F)
+           last_pg = len(sheet_pg.get_all_values())
+           if last_pg > 1:
+              sheet_pg.batch_clear([f"A2:F{last_pg}"])
 
         await update.message.reply_text("Data berhasil direset ✅")
         return
@@ -356,6 +355,7 @@ app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
 
 print("Bot berjalan...")
 app.run_polling(drop_pending_updates=True)
+
 
 
 
