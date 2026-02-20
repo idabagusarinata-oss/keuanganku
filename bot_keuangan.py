@@ -46,17 +46,23 @@ CREATE TABLE IF NOT EXISTS pengeluaran (
 conn.commit()
 
 # ================= GOOGLE SHEET =================
-scope = ["https://www.googleapis.com/auth/spreadsheets",
-         "https://www.googleapis.com/auth/drive"]
+try:
+    scope = ["https://www.googleapis.com/auth/spreadsheets",
+             "https://www.googleapis.com/auth/drive"]
 
-creds_dict = json.loads(GOOGLE_CREDS)
-creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
-client = gspread.authorize(creds)
+    creds_dict = json.loads(GOOGLE_CREDS)
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+    client = gspread.authorize(creds)
 
-spreadsheet = client.open("Monitoring Keuangan")
-sheet_pm = spreadsheet.worksheet("Pemasukan")
-sheet_pg = spreadsheet.worksheet("Pengeluaran")
-sheet_ringkasan = spreadsheet.worksheet("Ringkasan")
+    spreadsheet = client.open("Monitoring Keuangan")
+    sheet_pm = spreadsheet.worksheet("Pemasukan")
+    sheet_pg = spreadsheet.worksheet("Pengeluaran")
+    sheet_ringkasan = spreadsheet.worksheet("Ringkasan")
+
+    GOOGLE_READY = True
+except Exception as e:
+    print("Google Init Error:", e)
+    GOOGLE_READY = False
 
 # ================= HELPER =================
 def parse_tanggal(text):
@@ -87,17 +93,22 @@ def generate_no(tipe):
     return f"{prefix}-{now}-{str(count).zfill(4)}"
 
 def update_ringkasan():
-    cursor.execute("SELECT COALESCE(SUM(jumlah),0) FROM pemasukan")
-    total_pm = cursor.fetchone()[0]
-    cursor.execute("SELECT COALESCE(SUM(jumlah),0) FROM pengeluaran")
-    total_pg = cursor.fetchone()[0]
-    saldo = total_pm - total_pg
+    if not GOOGLE_READY:
+        return
+    try:
+        cursor.execute("SELECT COALESCE(SUM(jumlah),0) FROM pemasukan")
+        total_pm = cursor.fetchone()[0]
+        cursor.execute("SELECT COALESCE(SUM(jumlah),0) FROM pengeluaran")
+        total_pg = cursor.fetchone()[0]
+        saldo = total_pm - total_pg
 
-    sheet_ringkasan.update("A1:B3", [
-        ["Total Pemasukan", total_pm],
-        ["Total Pengeluaran", total_pg],
-        ["Saldo", saldo]
-    ])
+        sheet_ringkasan.update("A1:B3", [
+            ["Total Pemasukan", total_pm],
+            ["Total Pengeluaran", total_pg],
+            ["Saldo", saldo]
+        ])
+    except Exception as e:
+        print("Ringkasan Error:", e)
 
 # ================= KEYBOARD =================
 keyboard = [
@@ -123,9 +134,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         cursor.execute("TRUNCATE pemasukan, pengeluaran RESTART IDENTITY")
         conn.commit()
-        sheet_pm.clear()
-        sheet_pg.clear()
-        sheet_ringkasan.clear()
         await update.message.reply_text("Data berhasil direset.")
         return
 
@@ -171,6 +179,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not tanggal:
             await update.message.reply_text("Format salah.")
             return
+
         no = generate_no("pemasukan")
 
         cursor.execute(
@@ -179,8 +188,12 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         conn.commit()
 
-        sheet_pm.append_row([no, context.user_data["jumlah"], tanggal])
-        update_ringkasan()
+        if GOOGLE_READY:
+            try:
+                sheet_pm.append_row([no, context.user_data["jumlah"], tanggal])
+                update_ringkasan()
+            except Exception as e:
+                print("Sheet PM Error:", e)
 
         await update.message.reply_text(f"Disimpan ✅\nNo: {no}")
         context.user_data.clear()
@@ -242,16 +255,19 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ))
         conn.commit()
 
-        sheet_pg.append_row([
-            no,
-            context.user_data["keterangan"],
-            context.user_data["kategori"],
-            context.user_data["jumlah"],
-            context.user_data["merchant"],
-            tanggal
-        ])
-
-        update_ringkasan()
+        if GOOGLE_READY:
+            try:
+                sheet_pg.append_row([
+                    no,
+                    context.user_data["keterangan"],
+                    context.user_data["kategori"],
+                    context.user_data["jumlah"],
+                    context.user_data["merchant"],
+                    tanggal
+                ])
+                update_ringkasan()
+            except Exception as e:
+                print("Sheet PG Error:", e)
 
         await update.message.reply_text(f"Disimpan ✅\nNo: {no}")
         context.user_data.clear()
